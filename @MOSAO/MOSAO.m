@@ -19,6 +19,7 @@ classdef MOSAO < handle
 		iter
 		temp
 		classifier
+		initModel
 		model
 		final
 	end
@@ -85,6 +86,7 @@ classdef MOSAO < handle
 			obj.iter = [];
 			obj.temp = [];
 			obj.classifier = [];
+			obj.initModel = cell(0);
 			obj.model = cell(0);
 			obj.final = [];
 		end
@@ -93,7 +95,6 @@ classdef MOSAO < handle
 		[obj] = run(obj, initialX); % Runs optimization
 		[obj] = continue_run(obj); % Picks up a previous run
 		[obj] = initialize(obj, initialX); % Runs initial set of X values
-		%[obj] = add_previous(obj, previousX, previousY, previousValid)
 		[obj, X, data] = local_search(obj, initialX); % Performs a local search
 		[obj] = remove_iteration(obj, iteration); % Removes iteration(s)
 	end
@@ -110,6 +111,7 @@ classdef MOSAO < handle
 		[validOptions, validBool] = validate_options(options);
 		
 		[PoV] = classification_probability(X, model);
+		[mean] = mean_prediction(X, model);
 		[PoI] = probability_of_improvement(X, model, fmin);
 		[EI] = expected_improvement(X, model, fmin);
 		
@@ -129,5 +131,8 @@ classdef MOSAO < handle
 		[EHVI] = expected_hypervolume_improvement(P, Yref, HVprev, models, Xnew);
 		[y] = get_2D_attainment_points(P, Yref);
 		[y] = get_2D_summary_attainment_surface(Pset, Yref, method, nSamples);
+		
+		[meanOutput] = acquisition_mean(x, models, acqFunc);
+		[modelArray] = slice_sample_models(initModel, nSamples, nBurnin, nThin);
 	end	
 end

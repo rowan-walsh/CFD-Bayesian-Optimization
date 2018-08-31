@@ -99,7 +99,7 @@ obj.model = fitrgp( ...
 
 % Show messages
 if obj.opt.showMessages
-	fprintf('%5d %13d %#15.2e\n', j-1, obj.db.callAmount, min(obj.db.y(obj.db.valid)));
+	fprintf('%5d %13d %#15.3e\n', j-1, obj.db.callAmount, min(obj.db.y(obj.db.valid)));
 end
 
 lastCallAmount = 0;
@@ -265,7 +265,7 @@ while obj.db.callAmount < obj.opt.maxCalls
 	
 	% Display results
 	if obj.opt.showMessages
-		fprintf('%5d %13d %#15.2e\n', j, obj.db.callAmount, min(obj.db.y(obj.db.valid)));
+		fprintf('%5d %13d %#15.3e\n', j, obj.db.callAmount, min(obj.db.y(obj.db.valid)));
 	end
 	
 	lastCallAmount = obj.db.callAmount;

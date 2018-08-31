@@ -58,6 +58,11 @@ defaultOptions.BayesParallelMS =	false;
 defaultOptions.BayesMOAcqFunc =		'PoPI';
 defaultOptions.hypervolumeRef =		[];
 
+defaultOptions.AcqMarginalization = 'none';
+defaultOptions.AcqSamples =			20;
+defaultOptions.AcqNBurnin =			10;
+defaultOptions.AcqNThin =			1;
+
 % Set fields that don't exist or are empty to defaults
 Names = fieldnames(defaultOptions);
 for i = 1:size(Names,1)
@@ -145,6 +150,16 @@ if ~ischar(options.BayesMOAcqFunc) || ~any(strcmp(options.BayesMOAcqFunc, {'HVIn
 	warning('MOSAO:MiscOptionsInvalid', 'BayesMOAcqFunc not valid: set to default');
 	options.BayesMOAcqFunc = defaultOptions.BayesMOAcqFunc;
 	validBool = false;
+end
+
+if ~ischar(options.AcqMarginalization) || ~any(strcmp(options.AcqMarginalization, {'none', 'sliceSample'}))
+	warning('MOSAO:MiscOptionsInvalid', 'AcqMarginalization not valid: set to default');
+	options.AcqMarginalization = defaultOptions.AcqMarginalization;
+	validBool = false;
+end
+
+if strcmp(options.AcqMarginalization, 'none') % Enforce 1 sample when no marginalization is used
+	options.AcqSamples = 1;
 end
 
 % Assign output

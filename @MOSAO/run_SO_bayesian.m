@@ -74,6 +74,16 @@ switch obj.opt.GSinvalidTransform
 		error('MOSAO:UnrecognizedInvalidHandling', 'Unrecognized MOSAO.opt.GSinvalidTransform');
 end
 
+% Set handling of acquisition function marginalization
+switch obj.opt.AcqMarginalization
+	case 'none'
+		tempAcqMargin = @(x, models, acqFunc) acqFunc(x, models);
+	case 'sliceSample'
+		tempAcqMargin = @(x, models, acqFunc) MOSAO.acquisition_mean(x, models, acqFunc);
+	otherwise
+		error('MOSAO:UnrecognizedAcqusitionSamplingType', 'Unrecognized MOSAO.opt.AcqMarginalization');
+end
+
 % Create initial classification
 if obj.opt.GSuseClassifier
 	obj.classifier = fitPosterior(fitcsvm( ...
@@ -86,8 +96,8 @@ if obj.opt.GSuseClassifier
 		'ClassNames', [false, true] ));
 end
 
-% Create initial model
-obj.model = fitrgp( ...
+% Create initial model(s)
+obj.initModel = fitrgp( ...
 	obj.db.x, ...
 	tempYTransform(obj.db.y, obj.db.valid), ...
 	'Standardize', true, ...
@@ -97,10 +107,18 @@ obj.model = fitrgp( ...
 	'KernelFunction', obj.opt.GSkernel, ...
 	'Sigma', tempNoiseSigma, ...
 	'ConstantSigma', obj.opt.constantNoiseSigma	);
-
+switch obj.opt.AcqMarginalization
+	case 'none'
+		obj.model = obj.initModel;
+	case 'sliceSample'
+		obj.model = MOSAO.slice_sample_models(obj.initModel, obj.opt.AcqSamples, obj.opt.AcqNBurnin, obj.opt.AcqNThin);
+	otherwise
+		error('MOSAO:UnrecognizedAcqusitionSamplingType', 'Unrecognized MOSAO.opt.AcqMarginalization');
+end
+		
 % Show messages
 if obj.opt.showMessages
-	fprintf('%5d %13d %#15.2e\n', j-1, obj.db.callAmount, min(obj.db.y(obj.db.valid)));
+	fprintf('%5d %13d %#15.3e\n', j-1, obj.db.callAmount, min(obj.db.y(obj.db.valid)));
 end
 
 lastCallAmount = 0;
@@ -123,11 +141,14 @@ while obj.db.callAmount < obj.opt.maxCalls
 	% Define GA criteria based on options
 	switch obj.opt.BayesAcqFunc
 		case 'fitness'
-			acquisitionFunction = @(kX) predict(obj.model, kX);
+			%acquisitionFunction = @(kX) MOSAO.mean_prediction(kX, obj.model);
+			acquisitionFunction = @(kX) tempAcqMargin(kX, obj.model, @MOSAO.mean_prediction);
 		case 'PoI'
-			acquisitionFunction = @(kX) -1*MOSAO.probability_of_improvement(kX, obj.model, min(obj.db.y(obj.db.valid)));
+			%acquisitionFunction = @(kX) -1*MOSAO.probability_of_improvement(kX, obj.model, min(obj.db.y(obj.db.valid)));
+			acquisitionFunction = @(kX) -1*tempAcqMargin(kX, obj.model, @(x, mod) MOSAO.probability_of_improvement(x, mod, min(obj.db.y(obj.db.valid))));
 		case 'EI'
-			acquisitionFunction = @(kX) -1*MOSAO.expected_improvement(kX, obj.model, min(obj.db.y(obj.db.valid)));
+			%acquisitionFunction = @(kX) -1*MOSAO.expected_improvement(kX, obj.model, min(obj.db.y(obj.db.valid)));
+			acquisitionFunction = @(kX) -1*tempAcqMargin(kX, obj.model, @(x, mod) MOSAO.expected_improvement(x, mod, min(obj.db.y(obj.db.valid))));
 		otherwise
 			error('MOSAO:UnrecognizedGAcriteria', 'Unrecognized MOSAO.opt.GAcriteria');
 	end
@@ -141,11 +162,7 @@ while obj.db.callAmount < obj.opt.maxCalls
 		'lb', obj.db.LB, ...
 		'ub', obj.db.UB, ...
 		'options', obj.fminconOptions );
-% 	[obj.temp(j).x, obj.temp(j).fval, obj.temp(j).exitflag, ...
-% 	 obj.temp(j).output, obj.temp(j).solutions] = run( ...
-% 		obj.MultiStartOptions, ...
-% 		tempProblem, ...
-% 		obj.opt.BayesNstarts );
+
 	[obj.temp(j).x, obj.temp(j).fval, obj.temp(j).exitflag, ...
 	 obj.temp(j).output, tempSolutions] = run( ...
 		obj.MultiStartOptions, ...
@@ -153,21 +170,30 @@ while obj.db.callAmount < obj.opt.maxCalls
 		obj.opt.BayesNstarts );
 	
 	% Check for duplicates
-	%obj.iter(j).foundMinX = cell2mat({obj.temp(j).solutions.X}');
 	obj.iter(j).foundMinX = cell2mat({tempSolutions.X}');
 	obj.iter(j).untestedI = find(~obj.db.check_existence(obj.iter(j).foundMinX));
-	obj.iter(j).toUseI = obj.iter(j).untestedI(1:obj.opt.BayesNcandidates);
 	
+	% If not enough (non-duplicate) candidate points are found, use random points
+	nUntested = length(obj.iter(j).untestedI);
+	if nUntested < obj.opt.BayesNcandidates
+		obj.iter(j).toUseX = [ ...
+			obj.iter(j).foundMinX(obj.iter(j).untestedI(1:nUntested),:); ...
+			obj.db.LB + (obj.db.UB - obj.db.LB).*rand(obj.opt.BayesNcandidates - nUntested, obj.db.lenX) ];
+	else
+		obj.iter(j).toUseX = obj.iter(j).foundMinX(obj.iter(j).untestedI(1:obj.opt.BayesNcandidates),:);
+	end
+	%obj.iter(j).toUseI = obj.iter(j).untestedI(1:obj.opt.BayesNcandidates);
+			
 	% Evaluate candidates
 	switch obj.opt.type
 		case 'bls'
 			% Do local search on each candidate (no need for learning with Bayesian)
-			for k = obj.iter(j).toUseI
-				[obj,~,~] = obj.local_search(obj.iter(j).foundMinX(k,:));
+			for k = 1:obj.opt.BayesNcandidates
+				[obj,~,~] = obj.local_search(obj.iter(j).toUseX(k,:));
 			end
 		case 'b'
 			% Evaluate candidate(s) directly
-			obj.db = obj.db.call_function(obj.iter(j).foundMinX(obj.iter(j).toUseI,:));
+			obj.db = obj.db.call_function(obj.iter(j).toUseX);
 		otherwise
 			error('MOSAO:UnrecognizedType', 'Unrecognized MOSAO.opt.type');
 	end
@@ -187,7 +213,7 @@ while obj.db.callAmount < obj.opt.maxCalls
 		
 		if obj.opt.reuseKernel
 			try
-				obj.model = fitrgp( ...
+				obj.initModel = fitrgp( ...
 					obj.db.x, ...
 					tempYTransform(obj.db.y, obj.db.valid), ...
 					'Standardize', true, ...
@@ -197,14 +223,14 @@ while obj.db.callAmount < obj.opt.maxCalls
 					'KernelFunction', obj.opt.GSkernel, ...
 					'Sigma', tempNoiseSigma, ...
 					'ConstantSigma', obj.opt.constantNoiseSigma, ... 
-					'KernelParameters', obj.model.KernelInformation.KernelParameters );
+					'KernelParameters', obj.initModel.KernelInformation.KernelParameters );
 			catch tempME
 				switch tempME.identifier
 					% If unable to find theta, try again with no theta0 set
 					case 'stats:classreg:learning:impl:GPImpl:GPImpl:UnableToComputeLFactorExact'
 						warning('MOSAO:DefaultingTheta0', ...
 							'Unable to compute theta (kernel) given specified theta0 at j=%d.\nDefaulting to unspecified theta0.', j);
-						obj.model = fitrgp( ...
+						obj.initModel = fitrgp( ...
 							obj.db.x, ...
 							tempYTransform(obj.db.y, obj.db.valid), ...
 							'Standardize', true, ...
@@ -219,7 +245,7 @@ while obj.db.callAmount < obj.opt.maxCalls
 				end
 			end
 		else
-			obj.model = fitrgp( ...
+			obj.initModel = fitrgp( ...
 				obj.db.x, ...
 				tempYTransform(obj.db.y, obj.db.valid), ...
 				'Standardize', true, ...
@@ -230,11 +256,21 @@ while obj.db.callAmount < obj.opt.maxCalls
 				'Sigma', tempNoiseSigma, ...
 				'ConstantSigma', obj.opt.constantNoiseSigma );
 		end
+		
+		% Update model(s) for acquisition functions
+		switch obj.opt.AcqMarginalization
+			case 'none'
+				obj.model = obj.initModel;
+			case 'sliceSample'
+				obj.model = MOSAO.slice_sample_models(obj.initModel, obj.opt.AcqSamples, obj.opt.AcqNBurnin, obj.opt.AcqNThin);
+			otherwise
+				error('MOSAO:UnrecognizedAcqusitionSamplingType', 'Unrecognized MOSAO.opt.AcqMarginalization');
+		end
 	end
 	
 	% Display results
 	if obj.opt.showMessages
-		fprintf('%5d %13d %#15.2e\n', j, obj.db.callAmount, min(obj.db.y(obj.db.valid)));
+		fprintf('%5d %13d %#15.3e\n', j, obj.db.callAmount, min(obj.db.y(obj.db.valid)));
 	end
 	
 	lastCallAmount = obj.db.callAmount;

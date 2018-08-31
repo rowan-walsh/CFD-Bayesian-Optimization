@@ -75,6 +75,16 @@ switch obj.opt.GSinvalidTransform
 		error('MOSAO:UnrecognizedInvalidHandling', 'Unrecognized MOSAO.opt.GSinvalidTransform');
 end
 
+% Set handling of acquisition function marginalization
+switch obj.opt.AcqMarginalization
+	case 'none'
+		tempAcqMargin = @(x, models, acqFunc) acqFunc(x, models);
+	case 'sliceSample'
+		tempAcqMargin = @(x, models, acqFunc) MOSAO.acquisition_mean(x, models, acqFunc);
+	otherwise
+		error('MOSAO:UnrecognizedAcqusitionSamplingType', 'Unrecognized MOSAO.opt.AcqMarginalization');
+end
+
 % Create initial classification
 if obj.opt.GSuseClassifier
 	obj.classifier = fitPosterior(fitcsvm( ...
@@ -88,8 +98,10 @@ if obj.opt.GSuseClassifier
 end
 
 % Create initial models
+obj.initModel = cell(1, obj.db.lenY);
+obj.model = cell(obj.opt.AcqSamples, obj.db.lenY);
 for i = 1:obj.db.lenY
-	obj.model{i} = fitrgp( ...
+	obj.initModel{1,i} = fitrgp( ...
 		obj.db.x, ...
 		tempYTransform(obj.db.y(:,i), obj.db.valid), ...
 		'Standardize', true, ...
@@ -98,13 +110,21 @@ for i = 1:obj.db.lenY
 		'BasisFunction', obj.opt.GSbasis, ...
 		'KernelFunction', obj.opt.GSkernel, ...
 		'Sigma', tempNoiseSigma, ...
-		'ConstantSigma', obj.opt.constantNoiseSigma	);				
+		'ConstantSigma', obj.opt.constantNoiseSigma	);
+	switch obj.opt.AcqMarginalization
+		case 'none'
+			obj.model(:,i) = obj.initModel(i);
+		case 'sliceSample'
+			obj.model(:,i) = MOSAO.slice_sample_models(obj.initModel{i}, obj.opt.AcqSamples, obj.opt.AcqNBurnin, obj.opt.AcqNThin);
+		otherwise
+			error('MOSAO:UnrecognizedAcqusitionSamplingType', 'Unrecognized MOSAO.opt.AcqMarginalization');
+	end
 end
 
 % Show messages
 if obj.opt.showMessages
 	[printP,~,printVol] = MOSAO.pareto_front_hypervolume(obj.db.y(obj.db.valid,:), obj.opt.hypervolumeRef);
-	fprintf('%5d %13d %#15.2e %8d\n', j-1, obj.db.callAmount, printVol, size(printP, 1));
+	fprintf('%5d %13d %#15.3e %8d\n', j-1, obj.db.callAmount, printVol, size(printP, 1));
 end
 
 lastCallAmount = 0;
@@ -130,13 +150,17 @@ while obj.db.callAmount < obj.opt.maxCalls
 	[tempP, tempYref, tempHV, tempPind] = MOSAO.pareto_front_hypervolume(obj.db.y(obj.db.valid,:), obj.opt.hypervolumeRef);
 	switch obj.opt.BayesMOAcqFunc
 		case 'HVIncreaseMean'
-			acquisitionFunction = @(kX) -1*MOSAO.change_of_hypervolume(tempP, tempYref, tempHV, obj.model, kX, 'meanValue');
+			%acquisitionFunction = @(kX) -1*MOSAO.change_of_hypervolume(tempP, tempYref, tempHV, obj.model, kX, 'meanValue');
+			acquisitionFunction = @(kX) -1*tempAcqMargin(kX, obj.model, @(x, mod) MOSAO.change_of_hypervolume(tempP, tempYref, tempHV, mod, x, 'meanValue'));
 		case 'HVIncreaseLCB'
-			acquisitionFunction = @(kX) -1*MOSAO.change_of_hypervolume(tempP, tempYref, tempHV, obj.model, kX, 'LCB');
+			%acquisitionFunction = @(kX) -1*MOSAO.change_of_hypervolume(tempP, tempYref, tempHV, obj.model, kX, 'LCB');
+			acquisitionFunction = @(kX) -1*tempAcqMargin(kX, obj.model, @(x, mod) MOSAO.change_of_hypervolume(tempP, tempYref, tempHV, mod, x, 'LCB'));
 		case 'PoPI'
-			acquisitionFunction = @(kX) -1*MOSAO.probability_of_pareto_improvement(tempP, obj.model, kX);
+			%acquisitionFunction = @(kX) -1*MOSAO.probability_of_pareto_improvement(tempP, obj.model, kX);
+			acquisitionFunction = @(kX) -1*tempAcqMargin(kX, obj.model, @(x, mod) MOSAO.probability_of_pareto_improvement(tempP, mod, x));
 		case 'EHVI'
-			acquisitionFunction = @(kX) -1*MOSAO.expected_hypervolume_improvement(tempP, tempYref, tempHV, obj.model, kX);
+			%acquisitionFunction = @(kX) -1*MOSAO.expected_hypervolume_improvement(tempP, tempYref, tempHV, obj.model, kX);
+			acquisitionFunction = @(kX) -1*tempAcqMargin(kX, obj.model, @(x, mod) MOSAO.expected_hypervolume_improvement(tempP, tempYref, tempHV, mod, x));
 		otherwise
 			error('MOSAO:UnrecognizedGAcriteria', 'Unrecognized obj.opt.GAcriteria');
 	end
@@ -166,13 +190,23 @@ while obj.db.callAmount < obj.opt.maxCalls
 	% Check for duplicates
 	obj.iter(j).foundMinX = cell2mat({obj.temp(j).solutions.X}');
 	obj.iter(j).untestedI = find(~obj.db.check_existence(obj.iter(j).foundMinX));
-	obj.iter(j).toUseI = obj.iter(j).untestedI(1:obj.opt.BayesNcandidates);
+	
+	% If not enough (non-duplicate) candidate points are found, use random points
+	nUntested = length(obj.iter(j).untestedI);
+	if nUntested < obj.opt.BayesNcandidates
+		obj.iter(j).toUseX = [ ...
+			obj.iter(j).foundMinX(obj.iter(j).untestedI(1:nUntested),:); ...
+			obj.db.LB + (obj.db.UB - obj.db.LB).*rand(obj.opt.BayesNcandidates - nUntested, obj.db.lenX) ];
+	else
+		obj.iter(j).toUseX = obj.iter(j).foundMinX(obj.iter(j).untestedI(1:obj.opt.BayesNcandidates),:);
+	end
+	%obj.iter(j).toUseI = obj.iter(j).untestedI(1:obj.opt.BayesNcandidates);
 	
 	% Evaluate candidates
 	switch obj.opt.type
 		case 'b'
 			% Evaluate candidate(s) directly
-			obj.db = obj.db.call_function(obj.iter(j).foundMinX(obj.iter(j).toUseI,:));
+			obj.db = obj.db.call_function(obj.iter(j).toUseX);
 		otherwise
 			error('MOSAO:UnrecognizedType', 'Unrecognized obj.opt.type for MO optimization.');
 	end
@@ -193,7 +227,7 @@ while obj.db.callAmount < obj.opt.maxCalls
 		for i = 1:obj.db.lenY
 			if obj.opt.reuseKernel
 				try
-					obj.model{i} = fitrgp( ...
+					obj.initModel{i} = fitrgp( ...
 						obj.db.x, ...
 						tempYTransform(obj.db.y(:,i), obj.db.valid), ...
 						'Standardize', true, ...
@@ -203,14 +237,14 @@ while obj.db.callAmount < obj.opt.maxCalls
 						'KernelFunction', obj.opt.GSkernel, ...
 						'Sigma', tempNoiseSigma, ...
 						'ConstantSigma', obj.opt.constantNoiseSigma, ... 
-						'KernelParameters', obj.model{i}.KernelInformation.KernelParameters );
+						'KernelParameters', obj.initModel{i}.KernelInformation.KernelParameters );
 				catch tempME
 					switch tempME.identifier
 						% If unable to find theta, try again with no theta0 set
 						case 'stats:classreg:learning:impl:GPImpl:GPImpl:UnableToComputeLFactorExact'
 							warning('MOSAO:DefaultingTheta0', ...
 								'Unable to compute theta (kernel) given specified theta0 at j=%d.\nDefaulting to unspecified theta0.', j);
-							obj.model{i} = fitrgp( ...
+							obj.initModel{i} = fitrgp( ...
 								obj.db.x, ...
 								tempYTransform(obj.db.y(:,i), obj.db.valid), ...
 								'Standardize', true, ...
@@ -225,7 +259,7 @@ while obj.db.callAmount < obj.opt.maxCalls
 					end
 				end
 			else
-				obj.model{i} = fitrgp( ...
+				obj.initModel{i} = fitrgp( ...
 					obj.db.x, ...
 					tempYTransform(obj.db.y(:,i), obj.db.valid), ...
 					'Standardize', true, ...
@@ -236,6 +270,16 @@ while obj.db.callAmount < obj.opt.maxCalls
 					'Sigma', tempNoiseSigma, ...
 					'ConstantSigma', obj.opt.constantNoiseSigma );
 			end
+			
+			% Update model(s) for acquisition functions
+			switch obj.opt.AcqMarginalization
+				case 'none'
+					obj.model(:,i) = obj.initModel(i);
+				case 'sliceSample'
+					obj.model(:,i) = MOSAO.slice_sample_models(obj.initModel{i}, obj.opt.AcqSamples, obj.opt.AcqNBurnin, obj.opt.AcqNThin);
+				otherwise
+					error('MOSAO:UnrecognizedAcqusitionSamplingType', 'Unrecognized MOSAO.opt.AcqMarginalization');
+			end
 		end
 	end
 	
@@ -244,7 +288,7 @@ while obj.db.callAmount < obj.opt.maxCalls
 	
 	% Show messages
 	if obj.opt.showMessages
-		fprintf('%5d %13d %#15.2e %8d\n', j, obj.db.callAmount, tempHV, size(tempP, 1));
+		fprintf('%5d %13d %#15.3e %8d\n', j, obj.db.callAmount, tempHV, size(tempP, 1));
 	end
 	
 	lastCallAmount = obj.db.callAmount;

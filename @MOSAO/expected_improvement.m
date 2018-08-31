@@ -2,6 +2,10 @@ function [EI] = expected_improvement(X, model, fmin)
 %EXPECTED_IMPROVEMENT Calculates expected improvement of a model at X
 %	Based on Jones et al. (2001), Eqn. (35)
 
+if iscell(model)
+	model = model{1};
+end
+
 if isa(model, 'struct')
 	[y, ssq] = predictor(X, model);
 	s = sqrt(ssq);
